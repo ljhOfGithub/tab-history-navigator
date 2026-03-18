@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Tab History Navigator",
+  "version": "1.0.0",
+  "description": "像VS Code一样在标签页历史中前进后退",
+  "permissions": [
+    "tabs",
+    "storage",
+    "sessions"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html"
+  },
+  "commands": {
+    "navigate-back": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Left",
+        "mac": "Command+Shift+Left"
+      },
+      "description": "在标签页历史中后退"
+    },
+    "navigate-forward": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Right",
+        "mac": "Command+Shift+Right"
+      },
+      "description": "在标签页历史中前进"
+    }
+  }
+}
