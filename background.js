@@ -14,21 +14,34 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
   
   // 获取标签页详情
   chrome.tabs.get(tabId, (tab) => {
-    if (tab && tab.url && !tab.url.startsWith('chrome://')) {
+    if (tab && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('edge://') && !tab.url.startsWith('about:')) {
       recordTabVisit(tabId, tab);
     }
   });
 });
 
-// 监听标签页更新（页面导航）
+// 监听标签页更新（页面导航）- 关键：确保记录完整URL
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   // 当页面加载完成且URL变化时记录
-  if (changeInfo.status === 'complete' && tab.url && !tab.url.startsWith('chrome://')) {
+  // 使用status='complete'确保获取到最终URL（包括SPA路由变化）
+  if (changeInfo.status === 'complete' && tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('edge://') && !tab.url.startsWith('about:')) {
     recordTabVisit(tabId, tab);
+  }
+  
+  // 额外监听url变化，确保SPA应用也能记录（有些SPA不触发complete）
+  if (changeInfo.url) {
+    // 延迟一下确保获取完整信息
+    setTimeout(() => {
+      chrome.tabs.get(tabId, (updatedTab) => {
+        if (updatedTab && updatedTab.url && !updatedTab.url.startsWith('chrome://')) {
+          recordTabVisit(tabId, updatedTab);
+        }
+      });
+    }, 100);
   }
 });
 
-// 记录标签页访问
+// 记录标签页访问 - 保存完整URL
 function recordTabVisit(tabId, tab) {
   if (!tabHistories[tabId]) {
     tabHistories[tabId] = {
@@ -39,17 +52,22 @@ function recordTabVisit(tabId, tab) {
   }
   
   const history = tabHistories[tabId];
+  
+  // 使用tab.url，这是浏览器提供的完整URL（包括所有参数和#片段）
+  const fullUrl = tab.url;
+  const pageTitle = tab.title || fullUrl;
+  
   const newEntry = {
     tabId: tabId,
     windowId: tab.windowId,
-    url: tab.url,
-    title: tab.title || tab.url,
+    url: fullUrl,           // 完整URL，一字不差
+    title: pageTitle,
     timestamp: Date.now()
   };
   
   // 如果当前有记录，把当前记录压入后退栈
   if (history.currentEntry) {
-    // 避免重复记录相同的URL
+    // 避免重复记录完全相同的URL（包括所有参数）
     if (history.currentEntry.url !== newEntry.url) {
       history.backStack.push(history.currentEntry);
       // 限制后退栈大小（比如50条）
@@ -58,6 +76,11 @@ function recordTabVisit(tabId, tab) {
       }
       // 新导航时清空前栈
       history.forwardStack = [];
+    } else {
+      // 如果是同一个URL，只更新时间戳
+      history.currentEntry.timestamp = newEntry.timestamp;
+      saveHistories();
+      return;
     }
   }
   
@@ -65,6 +88,9 @@ function recordTabVisit(tabId, tab) {
   
   // 保存到storage
   saveHistories();
+  
+  // 调试用：可以在background控制台查看记录的URL
+  console.log('记录完整URL:', fullUrl);
 }
 
 // 后退功能
@@ -86,12 +112,9 @@ function navigateBack() {
       const previousEntry = history.backStack.pop();
       history.currentEntry = previousEntry;
       
-      // 导航到历史记录
+      // 导航到历史记录（使用完整URL）
       chrome.tabs.update(tabId, { url: previousEntry.url });
       saveHistories();
-    } else {
-      // 没有后退历史，可以提示用户
-      console.log('没有后退历史');
     }
   });
 }
@@ -115,11 +138,9 @@ function navigateForward() {
       const nextEntry = history.forwardStack.pop();
       history.currentEntry = nextEntry;
       
-      // 导航到历史记录
+      // 导航到历史记录（使用完整URL）
       chrome.tabs.update(tabId, { url: nextEntry.url });
       saveHistories();
-    } else {
-      console.log('没有前进历史');
     }
   });
 }
@@ -146,64 +167,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-// 监听来自 popup 的消息
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'navigateBack') {
-    navigateBack();
-  } else if (request.action === 'navigateForward') {
-    navigateForward();
-  }
-  return true;
-});
-
-// 增强的导航函数，支持异步操作
-async function navigateBack() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const currentTab = tabs[0];
-  if (!currentTab) return;
-  
-  const history = tabHistories[currentTab.id];
-  if (history && history.backStack.length > 0) {
-    // 保存当前位置到前进栈
-    if (history.currentEntry) {
-      history.forwardStack.push(history.currentEntry);
-    }
-    
-    // 从后退栈取出
-    const targetEntry = history.backStack.pop();
-    history.currentEntry = targetEntry;
-    
-    // 更新标签页并发送通知
-    await chrome.tabs.update(currentTab.id, { url: targetEntry.url });
-    saveHistories();
-    
-    // 通知 popup 更新（如果打开）
-    chrome.runtime.sendMessage({ action: 'historyUpdated' });
-  }
-}
-
-// 添加标签页组支持（Chrome 标签页分组）
-async function groupTabsByDomain() {
-  const tabs = await chrome.tabs.query({});
-  const groups = {};
-  
-  tabs.forEach(tab => {
-    try {
-      const domain = new URL(tab.url).hostname;
-      if (!groups[domain]) {
-        groups[domain] = [];
+// 可选：监听历史导航完成，确保记录成功
+chrome.webNavigation ? chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  // 对于使用History API的SPA，确保记录
+  if (details.url && !details.url.startsWith('chrome://')) {
+    chrome.tabs.get(details.tabId, (tab) => {
+      if (tab) {
+        recordTabVisit(details.tabId, tab);
       }
-      groups[domain].push(tab.id);
-    } catch (e) {
-      // 忽略无效URL
-    }
-  });
-  
-  // 为每个域名创建分组
-  for (const [domain, tabIds] of Object.entries(groups)) {
-    if (tabIds.length > 1) {
-      const groupId = await chrome.tabs.group({ tabIds });
-      await chrome.tabGroups.update(groupId, { title: domain });
-    }
+    });
   }
-}
+}) : null;
